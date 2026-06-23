@@ -1,0 +1,4 @@
+#!/bin/sh
+# Self-heal watchdog (cron */5): re-assert the correct rules for the persisted state.
+# Fixes a kill switch that went missing while ON, or a stranded bypass rule while OFF.
+/usr/bin/killswitch apply

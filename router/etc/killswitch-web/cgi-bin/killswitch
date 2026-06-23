@@ -1,0 +1,36 @@
+#!/bin/sh
+# Phone/web toggle page. Served by the dedicated uhttpd instance on <LAN_IP>:8090.
+# Bookmark:  http://192.168.8.1:8090/cgi-bin/killswitch?token=<TOKEN>
+# The TOKEN is generated on-device by deploy.sh and stored in /etc/killswitch.conf —
+# it is never committed to this repo. It only blocks casual LAN CSRF; the page is
+# LAN-only, so this is convenience auth, not a security boundary.
+. /etc/killswitch.conf 2>/dev/null
+mode=""; tok=""
+for kv in $(echo "$QUERY_STRING" | tr '&' ' '); do
+  case "$kv" in mode=*) mode=${kv#mode=} ;; token=*) tok=${kv#token=} ;; esac
+done
+printf 'Content-Type: text/html\r\n\r\n'
+if [ -z "$TOKEN" ] || [ "$tok" != "$TOKEN" ]; then
+  echo '<!doctype html><body style="font-family:sans-serif;text-align:center;padding:3em"><h2>Forbidden</h2><p>Missing or wrong token.</p></body>'
+  exit 0
+fi
+case "$mode" in
+  on)  /usr/bin/killswitch on  >/dev/null 2>&1 ;;
+  off) /usr/bin/killswitch off >/dev/null 2>&1 ;;
+esac
+st=$(cat /etc/killswitch.state 2>/dev/null || echo unknown)
+eg=$(curl -s --max-time 6 ifconfig.me 2>/dev/null)
+if [ "$st" = "on" ]; then color="#0a7d28"; label="KILL SWITCH ON &mdash; via exit node"; else color="#b00020"; label="KILL SWITCH OFF &mdash; local internet"; fi
+cat <<EOF
+<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>killswitch</title></head>
+<body style="font-family:-apple-system,sans-serif;text-align:center;padding:2em;background:#111;color:#eee">
+<h1 style="color:$color">$label</h1>
+<p>egress IP: <b>$eg</b><br><small>state=$st</small></p>
+<div style="margin-top:2em">
+<a href="?token=$TOKEN&mode=on"  style="display:inline-block;background:#0a7d28;color:#fff;padding:.8em 1.6em;font-size:1.3em;text-decoration:none;border-radius:10px;margin:.4em">TURN ON</a>
+<a href="?token=$TOKEN&mode=off" style="display:inline-block;background:#b00020;color:#fff;padding:.8em 1.6em;font-size:1.3em;text-decoration:none;border-radius:10px;margin:.4em">TURN OFF</a>
+</div>
+<p style="margin-top:2em"><a href="?token=$TOKEN" style="color:#88f">&#8635; refresh</a></p>
+</body></html>
+EOF

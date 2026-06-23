@@ -1,0 +1,9 @@
+#!/bin/sh /etc/rc.common
+# Pre-network (START=05) assertion of the correct rules for the persisted state,
+# BEFORE traffic can flow on boot. ON -> kill-switch dead-end; OFF -> WAN bypass.
+# ip rules are interface-independent, so they install before WAN exists.
+START=05
+STOP=99
+boot() { start "$@"; }
+start() { /usr/bin/killswitch apply; }
+stop() { :; }   # deliberately a no-op: never tear down on service stop

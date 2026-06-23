@@ -1,0 +1,39 @@
+#!/bin/sh
+# One-shot leak-proof test: drop the tunnel, prove WAN is dead (no clearnet leak),
+# then auto-restore. Safe to run detached — has a backstop that restarts Tailscale
+# even if the main body dies. Results in /tmp/killswitch-test.log
+. /etc/killswitch.conf 2>/dev/null
+WAN_IF="${WAN_IF:-eth0}"
+LOG=/tmp/killswitch-test.log; : > "$LOG"
+say() { echo "[$(date '+%H:%M:%S')] $*" >> "$LOG"; }
+
+# SAFETY BACKSTOP — independent of the main body
+( sleep 45; /etc/init.d/tailscale start; sleep 6; /usr/bin/killswitch on ) >/dev/null 2>&1 &
+
+say "exit IP BEFORE (should be the exit node's IP): $(curl -s --max-time 6 ifconfig.me)"
+
+# capture any non-control clearnet egress on WAN while the tunnel is down
+timeout 22 tcpdump -nni "$WAN_IF" 'not port 41641 and not port 22 and not arp and not port 67 and not port 68 and not icmp6 and not port 123' -c 80 > /tmp/killswitch-test.pcap 2>/dev/null &
+TD=$!
+
+say "STOPPING tailscale (simulating tunnel/exit-node drop)"
+/etc/init.d/tailscale stop
+sleep 4
+
+say "kill-switch rule still present while DOWN: $(ip rule show | grep -c '^5280:')"
+say "curl egress while DOWN  (MUST be empty/timeout): [$(curl -s --max-time 8 ifconfig.me)]"
+say "ping 1.1.1.1 while DOWN  (MUST fail):            $(ping -c2 -W2 1.1.1.1 2>&1 | tail -1)"
+say "main-table default route exists (the leak path we are blocking): $(ip route show default | head -1)"
+
+sleep 6
+kill $TD 2>/dev/null
+say "WAN clearnet packets captured while down (want ~0 non-control): $(wc -l < /tmp/killswitch-test.pcap)"
+say "---- pcap sample ----"; head -15 /tmp/killswitch-test.pcap >> "$LOG" 2>/dev/null
+
+say "RESTARTING tailscale + re-arming kill switch"
+/etc/init.d/tailscale start
+sleep 10
+/usr/bin/killswitch on >> "$LOG" 2>&1
+sleep 3
+say "exit IP AFTER restore (should be the exit node again): $(curl -s --max-time 10 ifconfig.me)"
+say "DONE"

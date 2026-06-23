@@ -1,0 +1,12 @@
+# Local configuration — contains your router target / exit-node IP. Never commit.
+config.env
+
+# On-device runtime files (the device generates these; not part of the repo)
+*.state
+*.conf
+!config.env.example
+
+# Local snapshots / captures
+*.pcap
+*-snapshot-*.txt
+killswitch-test.log

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Re-assert the correct rules the instant a WAN interface comes up (covers WAN restarts
+# and reasserts belt rules that fw3 flushes on reload). Reads persisted state via apply.
+[ "$ACTION" = "ifup" ] || exit 0
+case "$INTERFACE" in wan|wwan|secondwan|tethering) ;; *) exit 0 ;; esac
+/usr/bin/killswitch apply

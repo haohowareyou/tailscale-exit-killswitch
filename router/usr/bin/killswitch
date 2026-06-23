@@ -1,0 +1,71 @@
+#!/bin/sh
+# killswitch on|off|apply|status — atomic Tailscale exit-node enforcement + kill switch.
+#
+# ON  = route all LAN egress through the chosen Tailscale exit node, kill switch armed.
+#       If the tunnel or exit node drops, traffic hits a dead-end route and stops — it
+#       NEVER falls back to the bare WAN, so your real WAN IP can't leak. Fail = outage.
+# OFF = normal local internet. Removes the kill switch AND adds a main-table bypass that
+#       routes AROUND Tailscale's stuck RouteAll/table-52 (which otherwise black-holes
+#       traffic after you clear the exit node). Use for captive-portal logins.
+# apply = re-assert the rules for the current persisted state (boot/hotplug/heal use this).
+#
+# Config: /etc/killswitch.conf  (EXIT_NODE, WAN_IF). Created by deploy.sh.
+. /etc/killswitch.conf 2>/dev/null
+EXIT_NODE="${EXIT_NODE:?set EXIT_NODE in /etc/killswitch.conf}"
+WAN_IF="${WAN_IF:-eth0}"
+STATE="/etc/killswitch.state"
+KS=5280     # kill-switch dead-end rule (present when ON)
+BP=5268     # main-table bypass rule    (present when OFF; sits above Tailscale's rule)
+LOCK="/var/run/killswitch.lock"
+
+if command -v flock >/dev/null 2>&1; then exec 9>"$LOCK"; flock -n 9 || { echo "busy, another toggle is running"; exit 1; }; fi
+
+rules_on() {   # armed: kill-switch present, bypass absent
+  while ip rule show | grep -q "^${BP}:"; do ip rule del priority $BP 2>/dev/null || break; done
+  ip rule show    | grep -q "^${KS}:" || ip rule add priority $KS unreachable
+  ip -6 rule show | grep -q "^${KS}:" || ip -6 rule add priority $KS unreachable
+  ip6tables -C FORWARD -o "$WAN_IF" -j DROP 2>/dev/null || ip6tables -I FORWARD 1 -o "$WAN_IF" -j DROP
+  iptables  -C FORWARD -o "$WAN_IF" -d 224.0.0.0/4 -j DROP 2>/dev/null     || iptables -I FORWARD 1 -o "$WAN_IF" -d 224.0.0.0/4 -j DROP
+  iptables  -C FORWARD -o "$WAN_IF" -d 255.255.255.255 -j DROP 2>/dev/null || iptables -I FORWARD 1 -o "$WAN_IF" -d 255.255.255.255 -j DROP
+  sysctl -w net.ipv6.conf.$WAN_IF.disable_ipv6=1 >/dev/null 2>&1
+  sysctl -w net.ipv6.conf.$WAN_IF.accept_ra=0    >/dev/null 2>&1
+}
+rules_off() {  # normal internet: kill-switch absent, bypass present
+  while ip rule show    | grep -q "^${KS}:"; do ip rule del priority $KS    2>/dev/null || break; done
+  while ip -6 rule show | grep -q "^${KS}:"; do ip -6 rule del priority $KS 2>/dev/null || break; done
+  ip6tables -D FORWARD -o "$WAN_IF" -j DROP 2>/dev/null || true
+  iptables  -D FORWARD -o "$WAN_IF" -d 224.0.0.0/4 -j DROP 2>/dev/null || true
+  iptables  -D FORWARD -o "$WAN_IF" -d 255.255.255.255 -j DROP 2>/dev/null || true
+  ip rule show | grep -q "^${BP}:" || ip rule add priority $BP from all lookup main
+}
+
+case "$1" in
+  on)
+    trap 'rules_on' EXIT          # abnormal death leaves the kill switch ARMED (outage, never leak)
+    conntrack -F 2>/dev/null || true
+    rules_on
+    echo on > "$STATE"
+    tailscale set --exit-node="$EXIT_NODE" --exit-node-allow-lan-access=true --accept-dns=true
+    i=0; while [ $i -lt 30 ]; do tailscale status 2>/dev/null | grep -q "exit node;" && break; sleep 1; i=$((i+1)); done
+    trap - EXIT
+    echo "killswitch ON  (exit_node=$EXIT_NODE, armed)"
+    ;;
+  off)
+    rules_off                     # remove kill switch + add WAN bypass FIRST
+    echo off > "$STATE"
+    conntrack -F 2>/dev/null || true
+    tailscale set --exit-node=
+    echo "killswitch OFF (normal local internet)"
+    ;;
+  apply)                          # re-assert rules for the persisted state; no tailscale changes
+    if [ "$(cat "$STATE" 2>/dev/null)" = "on" ]; then rules_on; else rules_off; fi
+    ;;
+  status)
+    s=$(cat "$STATE" 2>/dev/null || echo unknown)
+    k=present; ip rule show | grep -q "^${KS}:" || k=absent
+    en=$(tailscale debug prefs 2>/dev/null | grep -o '"ExitNodeID": "[^"]*"')
+    eg=$(curl -s --max-time 6 ifconfig.me 2>/dev/null)
+    echo "state=$s  kill_switch=$k  $en  egress=$eg"
+    ;;
+  *) echo "usage: $0 on|off|apply|status"; exit 1 ;;
+esac
